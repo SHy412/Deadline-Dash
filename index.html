@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deadline Dash</title>
+  <style>
+    :root {
+      --bg: #0f1224;
+      --panel: #1b1f3a;
+      --text: #eef2ff;
+      --accent: #6ee7ff;
+      --good: #59d97a;
+      --warn: #ffd166;
+      --bad: #ff6b6b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at 20% 20%, #1f2550, var(--bg));
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+
+    .game-shell {
+      width: min(900px, 96vw);
+      background: rgba(17, 20, 42, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      padding: 12px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    .hud {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .hud-item {
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 10px;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .hud-item strong { color: var(--accent); }
+
+    #gameCanvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      background: linear-gradient(#10162f, #0b0f21);
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: rgba(4, 7, 20, 0.72);
+      border-radius: 12px;
+      padding: 20px;
+    }
+
+    .screen {
+      width: min(520px, 90%);
+      text-align: center;
+      background: rgba(27, 31, 58, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      padding: 22px;
+    }
+
+    h1, h2 { margin: 8px 0; }
+    p { opacity: 0.95; }
+
+    button {
+      margin-top: 12px;
+      border: none;
+      border-radius: 10px;
+      padding: 11px 18px;
+      font-weight: 700;
+      font-size: 15px;
+      background: linear-gradient(135deg, var(--accent), #55c9ff);
+      color: #091122;
+      cursor: pointer;
+      transition: transform .1s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+
+    .canvas-wrap {
+      position: relative;
+    }
+
+    .legend {
+      font-size: 14px;
+      opacity: 0.9;
+      margin-top: 8px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div class="hud">
+      <div class="hud-item">⏳ Time: <strong id="hudTime">90s</strong></div>
+      <div class="hud-item">📚 Progress: <strong id="hudProgress">0%</strong></div>
+      <div class="hud-item">🧠 Focus: <strong id="hudFocus">100</strong></div>
+      <div class="hud-item">💬 Status: <strong id="hudStatus">Press Start!</strong></div>
+    </div>
+
+    <div class="canvas-wrap">
+      <canvas id="gameCanvas" width="860" height="520"></canvas>
+      <div class="overlay" id="overlay"></div>
+    </div>
+    <div class="legend">Move with <b>WASD</b> or <b>Arrow keys</b>. Collect boosts, dodge distractions, beat the deadline!</div>
+  </div>
+
+  <script>
+    // =========================
+    // Core setup and constants
+    // =========================
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+
+    const hudTime = document.getElementById('hudTime');
+    const hudProgress = document.getElementById('hudProgress');
+    const hudFocus = document.getElementById('hudFocus');
+    const hudStatus = document.getElementById('hudStatus');
+    const overlay = document.getElementById('overlay');
+
+    const game = {
+      state: 'start',
+      timeLeft: 90,
+      progress: 0,
+      focus: 100,
+      status: 'Press Start!',
+      speedBoostUntil: 0,
+      spawnTimer: 0,
+      hazardTimer: 0,
+      burnoutZone: { x: 300, y: 170, w: 250, h: 170 },
+      items: [],
+      hazards: [],
+      lastTime: 0
+    };
+
+    const player = {
+      x: W / 2,
+      y: H / 2,
+      r: 18,
+      speed: 220,
+      vx: 0,
+      vy: 0
+    };
+
+    const monster = { x: 120, y: 100, r: 24, speed: 95 };
+    const keys = {};
+
+    // =========================
+    // Input handling
+    // =========================
+    addEventListener('keydown', (e) => {
+      keys[e.key.toLowerCase()] = true;
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+    });
+
+    addEventListener('keyup', (e) => {
+      keys[e.key.toLowerCase()] = false;
+    });
+
+    // =========================
+    // Utility helpers
+    // =========================
+    const rand = (min, max) => Math.random() * (max - min) + min;
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+    function circlesTouch(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y) <= (a.r + b.r);
+    }
+
+    function makeItem(type) {
+      const iconMap = { coffee: '☕', book: '📘', idea: '💡', rest: '🛋️' };
+      return {
+        type,
+        icon: iconMap[type],
+        x: rand(30, W - 30),
+        y: rand(40, H - 30),
+        r: 16
+      };
+    }
+
+    function makeHazard() {
+      return {
+        type: 'phone',
+        icon: '📱',
+        x: rand(30, W - 30),
+        y: rand(40, H - 30),
+        r: 17
+      };
+    }
+
+    // =========================
+    // Game screens
+    // =========================
+    function showScreen(title, body, buttonText, onClick) {
+      overlay.innerHTML = `
+        <div class="screen">
+          <h1>${title}</h1>
+          <p>${body}</p>
+          <button id="screenBtn">${buttonText}</button>
+        </div>`;
+      document.getElementById('screenBtn').onclick = onClick;
+      overlay.style.display = 'grid';
+    }
+
+    function hideScreen() { overlay.style.display = 'none'; }
+
+    function startScreen() {
+      showScreen('🎓 Deadline Dash',
+        'Finish your assignment before time runs out! Gather helpful items, avoid distractions, and keep your focus up.',
+        'Start Game',
+        () => startGame());
+    }
+
+    function winScreen() {
+      showScreen('🏆 You Submitted on Time!', `Progress reached ${Math.floor(game.progress)}% with ${Math.ceil(game.timeLeft)}s left.`, 'Play Again', () => startGame());
+    }
+
+    function loseScreen(reason) {
+      showScreen('💥 Deadline Missed', reason, 'Retry', () => startGame());
+    }
+
+    // =========================
+    // Core game state reset
+    // =========================
+    function startGame() {
+      game.state = 'playing';
+      game.timeLeft = 90;
+      game.progress = 0;
+      game.focus = 100;
+      game.status = 'Deep work mode!';
+      game.speedBoostUntil = 0;
+      game.items = [];
+      game.hazards = [];
+      game.spawnTimer = 0;
+      game.hazardTimer = 0;
+      player.x = W / 2; player.y = H / 2;
+      monster.x = 120; monster.y = 100;
+      hideScreen();
+    }
+
+    // =========================
+    // Gameplay update loop
+    // =========================
+    function update(dt) {
+      if (game.state !== 'playing') return;
+
+      game.timeLeft -= dt;
+      if (game.timeLeft <= 0) {
+        game.state = 'lose';
+        loseScreen('⏰ Time ran out! Your draft is still unfinished.');
+        return;
+      }
+
+      // Spawn helpful items and hazards over time
+      game.spawnTimer += dt;
+      game.hazardTimer += dt;
+      if (game.spawnTimer >= 1.7 && game.items.length < 8) {
+        game.spawnTimer = 0;
+        const roll = Math.random();
+        const type = roll < 0.25 ? 'coffee' : roll < 0.55 ? 'book' : roll < 0.8 ? 'idea' : 'rest';
+        game.items.push(makeItem(type));
+      }
+      if (game.hazardTimer >= 2.2 && game.hazards.length < 6) {
+        game.hazardTimer = 0;
+        game.hazards.push(makeHazard());
+      }
+
+      // Player movement and burnout zone slowdown
+      let dx = 0, dy = 0;
+      if (keys['w'] || keys['arrowup']) dy -= 1;
+      if (keys['s'] || keys['arrowdown']) dy += 1;
+      if (keys['a'] || keys['arrowleft']) dx -= 1;
+      if (keys['d'] || keys['arrowright']) dx += 1;
+
+      const len = Math.hypot(dx, dy) || 1;
+      dx /= len; dy /= len;
+
+      let moveSpeed = player.speed;
+      if (performance.now() < game.speedBoostUntil) moveSpeed *= 1.6;
+
+      const bz = game.burnoutZone;
+      const inBurnout = player.x > bz.x && player.x < bz.x + bz.w && player.y > bz.y && player.y < bz.y + bz.h;
+      if (inBurnout) {
+        moveSpeed *= 0.6;
+        game.status = 'Burnout zone draining momentum...';
+      }
+
+      player.x = clamp(player.x + dx * moveSpeed * dt, player.r, W - player.r);
+      player.y = clamp(player.y + dy * moveSpeed * dt, player.r, H - player.r);
+
+      // Monster follows player (procrastination hazard)
+      const mx = player.x - monster.x;
+      const my = player.y - monster.y;
+      const mlen = Math.hypot(mx, my) || 1;
+      monster.x += (mx / mlen) * monster.speed * dt;
+      monster.y += (my / mlen) * monster.speed * dt;
+
+      if (circlesTouch(player, monster)) {
+        game.timeLeft = Math.max(0, game.timeLeft - 8);
+        game.status = 'Procrastination monster hit! -8s';
+        player.x = clamp(player.x + (mx / mlen) * 40, player.r, W - player.r);
+        player.y = clamp(player.y + (my / mlen) * 40, player.r, H - player.r);
+      }
+
+      // Collect items
+      game.items = game.items.filter(item => {
+        if (circlesTouch(player, item)) {
+          if (item.type === 'coffee') {
+            game.speedBoostUntil = performance.now() + 5000;
+            game.status = 'Coffee boost: Zoom for 5s!';
+          } else if (item.type === 'book') {
+            game.progress = Math.min(100, game.progress + 10);
+            game.status = '+10% progress from studying!';
+          } else if (item.type === 'idea') {
+            game.progress = Math.min(100, game.progress + 20);
+            game.status = 'Great idea! +20% progress';
+          } else if (item.type === 'rest') {
+            game.focus = Math.min(100, game.focus + 15);
+            game.status = 'Quick reset: +15 focus';
+          }
+          return false;
+        }
+        return true;
+      });
+
+      // Hit phone distractions
+      game.hazards = game.hazards.filter(h => {
+        if (circlesTouch(player, h)) {
+          game.focus = Math.max(0, game.focus - 15);
+          game.status = 'Phone distraction! -15 focus';
+          return false;
+        }
+        return true;
+      });
+
+      // Passive focus drain for pressure feel
+      game.focus = Math.max(0, game.focus - dt * 1.8);
+
+      if (game.progress >= 100) {
+        game.state = 'win';
+        winScreen();
+      } else if (game.focus <= 0) {
+        game.state = 'lose';
+        loseScreen('😵 You lost all focus before finishing.');
+      } else if (performance.now() > game.speedBoostUntil && !inBurnout) {
+        game.status = 'Keep going! Stay focused.';
+      }
+    }
+
+    // =========================
+    // Rendering
+    // =========================
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+
+      // Background grid
+      ctx.save();
+      ctx.globalAlpha = 0.08;
+      ctx.strokeStyle = '#9fb2ff';
+      for (let x = 0; x < W; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, H);
+        ctx.stroke();
+      }
+      for (let y = 0; y < H; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(W, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // Burnout zone
+      const bz = game.burnoutZone;
+      ctx.fillStyle = 'rgba(255, 107, 107, 0.22)';
+      ctx.fillRect(bz.x, bz.y, bz.w, bz.h);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+      ctx.font = '16px Segoe UI';
+      ctx.fillText('🔥 Burnout Zone', bz.x + 10, bz.y + 24);
+
+      // Draw items
+      ctx.font = '27px serif';
+      for (const item of game.items) {
+        ctx.fillText(item.icon, item.x - 12, item.y + 10);
+      }
+
+      // Draw phone hazards
+      for (const h of game.hazards) {
+        ctx.fillText(h.icon, h.x - 12, h.y + 10);
+      }
+
+      // Monster
+      ctx.font = '32px serif';
+      ctx.fillText('👾', monster.x - 16, monster.y + 12);
+
+      // Player
+      ctx.beginPath();
+      ctx.fillStyle = '#6ee7ff';
+      ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = '24px serif';
+      ctx.fillText('🧑‍🎓', player.x - 12, player.y + 10);
+
+      // Boost indicator
+      if (performance.now() < game.speedBoostUntil) {
+        ctx.fillStyle = '#ffd166';
+        ctx.font = 'bold 16px Segoe UI';
+        ctx.fillText('⚡ Speed Boost Active', 12, H - 15);
+      }
+
+      // HUD updates
+      hudTime.textContent = `${Math.ceil(game.timeLeft)}s`;
+      hudProgress.textContent = `${Math.floor(game.progress)}%`;
+      hudFocus.textContent = `${Math.floor(game.focus)}`;
+      hudStatus.textContent = game.status;
+    }
+
+    function loop(ts) {
+      if (!game.lastTime) game.lastTime = ts;
+      const dt = Math.min(0.033, (ts - game.lastTime) / 1000);
+      game.lastTime = ts;
+
+      update(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    startScreen();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
